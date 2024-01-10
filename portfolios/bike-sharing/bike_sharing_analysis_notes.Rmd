@@ -1,0 +1,304 @@
+---
+title: "Bike Sharing Data Analysis Notebook"
+author: N Plaunov
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## Business task
+
+##### Main goal of this study is to suggest ways to **maximize number of annual memberships** of the Cyclistic company
+
+***
+***
+
+#### Facts, discovered during data analysis:
+
+ * **Non-members are spending longer time** (~35 minutes) than annual members 
+        (~7 minutes) on average on their trips
+ * **Casual riders** perform most of their **trips during weekends** (Saturday and Sunday)
+ * Member customers are mostly ride during workdays
+ * There is a **limited number of the most popular bike stations** 
+        that **casual riders** choose to start their trips from
+
+***
+***
+
+#### Recommendations, based on discovered facts
+
+ * **Limit duration of a single ride for non-members**, without affecting members trips duration
+ * Minimize impact of such policy change by **carefully choosing duration limit**
+  <br><font size="2">*Suggestion: set maximum duration of the trip for casual riders at or about average time they spend on a trip*</font>
+ * Considering that there is a small number of bike station, preferred by casual
+        riders, **organize campaign** in the vicinity of those stations, explaining
+        advantages of the annual subscription
+ * Aforementioned changes should create conditions that make membership more
+        attractive
+
+***
+***
+
+#### *Technical details of the data analysis could be found below*
+
+***
+***
+
+```{r libraries_load, warning=FALSE, message=FALSE, }
+library("tidyverse")
+library("hms")
+library("sf")
+library("mapview")
+```
+
+#### Preparing Environment and Loading Data
+
+##### *Loading and Normalizing Data Across Two Data Sources*
+* Reading data from CSVs ...
+```{r data load, message=FALSE }
+df_bike_trips_2019 <- read.csv("Divvy_Trips_2019_Q1.csv")
+df_bike_trips_2020 <- read.csv("Divvy_Trips_2020_Q1.csv")
+```
+
+```{r storing locations, message=FALSE}
+# Storing stations' locations for the future, using 2020 data
+df_station_loc <- df_bike_trips_2020 %>% distinct(start_station_id, start_lat, start_lng)
+```
+* Changing column names to match between two data sources ...
+```{r renaming columns, message=FALSE}
+# Renaming columns of 2019 data intop 2020 forma. Use only columns that exist in 2020 dataset
+df_2019 <- df_bike_trips_2019 %>% 
+  select(trip_id, start_time, end_time, from_station_id, to_station_id, from_station_name, to_station_name, usertype) %>% 
+  rename("ride_id"="trip_id") %>% rename("started_at"="start_time") %>% 
+  rename("ended_at"="end_time") %>% rename("start_station_id"="from_station_id") %>% 
+  rename("end_station_id"="to_station_id") %>% rename("start_station_name"="from_station_name") %>% 
+  rename("end_station_name"="to_station_name") %>% rename("member_casual"="usertype")
+```
+
+```{r normalizing values, message=FALSE}
+# Changing values in 2019 data for member_casual to match 2020 names
+df_2019["member_casual"][df_2019["member_casual"] == "Subscriber"] <- "member"
+df_2019["member_casual"][df_2019["member_casual"] == "Customer"] <- "casual"
+```
+
+```{r removing extra data columns, message=FALSE}
+# Droping columns from 2020 dataset that do not exist in 2019 one
+df_2020 <- df_bike_trips_2020 %>% 
+  select(ride_id, started_at, ended_at, start_station_id, end_station_id, start_station_name, end_station_name, member_casual)
+
+# Clean up to free up some RAM
+rm(df_bike_trips_2019)
+rm(df_bike_trips_2020)
+```
+* Merging data from two data sources ...
+```{r merging data for two years, message=FALSE}
+# Merging two dataframes, brought to the same format
+df_2019_2020 <- rbind(df_2019, df_2020)
+
+# Clean up to free up some RAM
+rm(df_2019)
+rm(df_2020)
+```
+* Adding calculated columns for summaries ...
+```{r adding calculated columns, message=FALSE}
+# Creating columns to calculate trips duration and days of week those were ridden
+df_2019_2020$ride_dur <- with(df_2019_2020, as.numeric(difftime(ended_at, started_at)))
+df_2019_2020$day_of_week <- with(df_2019_2020, strftime(df_2019_2020$started_at, "%A"))
+```
+
+***
+
+#### *Performing Data Cleanup and Preparing Data for Graphs*
+
+* Removing trips that have negative duration ...
+```{r cleaning negative time trips, message=FALSE}
+# Removing trips whose duration is negative
+df_tmp <- df_2019_2020[df_2019_2020$ride_dur > 0., ] %>% drop_na()
+rm(df_2019_2020)
+df_2019_2020 <- df_tmp
+rm(df_tmp)
+```
+* Removing trips that last more than 1 day ...
+```{r removing way too long rides, message=FALSE}
+# Removing trips that are longer than 1 day
+df_tmp <- df_2019_2020[df_2019_2020$ride_dur < 86401., ] %>% drop_na()
+rm(df_2019_2020)
+df_2019_2020 <- df_tmp
+rm(df_tmp)
+```
+* Grouping and summarizing data to use in graphs ...
+```{r preparing data for graph, message=FALSE}
+# Checking and preparing to graph distribution of the data
+df_summ <- df_2019_2020 %>% group_by(day_of_week,member_casual) %>% 
+  summarize(mean_ride_dur = mean(ride_dur), 
+            max_ride_dur = max(ride_dur), 
+            min_ride_dur = min(ride_dur),
+            total_rides = n(),
+            rides_dur = sum(ride_dur))
+# Creating levels for days of the week for sorting
+df_summ$day_of_week <- factor(df_summ$day_of_week, levels = c("Sunday", "Monday", 
+                                                              "Tuesday", "Wednesday", 
+                                                              "Thursday", "Friday", 
+                                                              "Saturday"))
+# Sorting weekdays according to levels
+df_summ_sorted <- df_summ[order(df_summ$day_of_week), ]
+
+rm(df_summ)
+
+```
+
+***
+***
+
+#### *Presenting Data Facts*
+
+```{r graphing number of rides, message=FALSE}
+# Displaying total number of rides per day of the week and per rider category
+ggplot(data=df_summ_sorted)+geom_line(mapping=aes(x=day_of_week, 
+                                           y=total_rides, 
+                                           color=member_casual, 
+                                           group=member_casual),linewidth=2)+
+  labs(x="Day of the Week", y="Total number of rides",title="Total Number of Rides")+
+  annotate(geom="text",x="Thursday",y=80000,label="Total number of rides by members")+
+  annotate(geom="text",x="Thursday",y=25000,label="Total number of rides by non-members")+
+  guides(x=guide_axis(n.dodge = 2,check.overlap = TRUE))+
+  theme(legend.position = "none")
+```
+
+***
+As could be seen from the graph above, casual riders are mostly ride during weekends, while member riders predominantly ride during workdays, which is not surprising. And one can also see that number of rides, ridden by members is significantly larger than for casual riders.
+
+```{r graphing rides durations, message=FALSE}
+# Displaying rides duration per day of the week and per rider category
+ggplot(data=df_summ_sorted)+geom_line(mapping=aes(x=day_of_week, 
+                                           y=rides_dur, 
+                                           color=member_casual, 
+                                           group=member_casual),linewidth=2)+
+  labs(x="Day of the Week", y="Total duration of rides, seconds",title="Total Durations of Rides")+
+  annotate(geom="text",x="Thursday",y=6e+07,label="Total duration of rides by members")+
+  annotate(geom="text",x="Thursday",y=3e+07,label="Total duration of rides by non-members")+
+  guides(x=guide_axis(n.dodge = 2,check.overlap = TRUE))+
+  theme(legend.position = "none")
+```
+
+***
+But when we look at the total rides duration for two categories of riders, we can see that despite smaller number of trips, non-members are spending on the road comparable time to the members.
+
+```{r graphing average ride duration, message=FALSE}
+# Displaying average ride duration for members and casual riders
+ggplot(data=df_summ_sorted)+geom_line(mapping=aes(x=day_of_week, 
+                                           y=mean_ride_dur, 
+                                           color=member_casual, 
+                                           group=member_casual),linewidth=2)+
+  labs(x="Day of the Week", y="Mean duration of rides, seconds",title="Average Durations of Rides")+
+  annotate(geom="text",x="Thursday",y=900,label="Member riders average ride duration")+
+  annotate(geom="text",x="Thursday",y=1750,label="Non-member riders average trip duration")+
+  guides(x=guide_axis(n.dodge = 2,check.overlap = TRUE))+
+  theme(legend.position = "none")
+```
+
+***
+And when we calculate average time both members and non-members are spending on their bike trips, we can see why despite smaller number of trips non-members are using bikes for approximately same time as members.
+
+
+***
+
+As data for the year of 2020 includes latitude and longitude of each bike station, I used that data to extrapolate to the year of 2019 that allowed me to create maps of the most popular stations for subscribed and non-subscribed travelers.
+
+```{r preparing maps, message=FALSE}
+
+rm(df_summ_sorted)
+
+# Preparing data for maps
+df_member_stations <- df_2019_2020[df_2019_2020$member_casual == "member", ] %>% distinct(start_station_name, start_station_id)
+df_casual_stations <- df_2019_2020[df_2019_2020$member_casual == "casual", ] %>% distinct(start_station_name, start_station_id)
+
+
+# Merging stations that are used by casual riders with stations' locations
+df_casual_st_loc <- merge(x = df_casual_stations, y = df_station_loc, by = "start_station_id", all = TRUE)
+rm(df_casual_stations)
+
+# Merging stations that are used by member riders with stations' locations
+df_member_st_loc <- merge(x = df_member_stations, y = df_station_loc, by = "start_station_id", all = TRUE)
+rm(df_member_stations)
+rm(df_station_loc)
+
+# Calculating number of rides per riders' category; stations are sorted by number of rides
+df_num_rides_member <- df_2019_2020[df_2019_2020$member_casual == "member", ] %>% count(start_station_id, sort=TRUE, name = "number_of_rides")
+df_num_rides_casual <- df_2019_2020[df_2019_2020$member_casual == "casual", ] %>% count(start_station_id, sort=TRUE, name = "number_of_rides")
+
+rm(df_2019_2020)
+
+# Merging stations' locations with number of rides from them per riders' category
+df_member_full <- merge(x = df_member_st_loc, y = df_num_rides_member, by = "start_station_id", all = TRUE) %>% drop_na()
+df_casual_full <- merge(x = df_casual_st_loc, y = df_num_rides_casual, by = "start_station_id", all = TRUE) %>% drop_na()
+
+rm(df_num_rides_member)
+rm(df_num_rides_casual)
+rm(df_member_st_loc)
+rm(df_casual_st_loc)
+
+# Generating dataframe for results summary
+df_show <- df_casual_full %>% arrange(desc(number_of_rides)) %>% top_n(10) %>% 
+  subset(select = -c(1,3,4)) %>% rename("Station Name      "="start_station_name") %>% 
+  rename("Number of Rides"="number_of_rides")
+
+
+# By converting dataframe into the spatial object, Mapview can be customized:
+casual_sf <- st_as_sf(df_casual_full, coords = c("start_lng", "start_lat"), crs = 4326)
+member_sf <- st_as_sf(df_member_full, coords = c("start_lng", "start_lat"), crs = 4326)
+
+rm(df_casual_full)
+rm(df_member_full)
+
+# Creating palette for maps
+pal = mapviewPalette("mapviewSpectralColors")
+```
+
+#### Map of the trips starting stations for **casual** riders
+```{r mapping casuals, message=FALSE, warning=FALSE}
+# Creating map of bike station, from which casual riders start their trips
+mapview(casual_sf["number_of_rides"],
+        cex = casual_sf$number_of_rides/200,
+        legend = TRUE,
+        col.regions = pal(200),
+        layer.name = "number_of_rides")
+rm(casual_sf)
+```
+
+#### Map of the trips starting stations for **member** riders
+```{r mapping members, message=FALSE, warning=FALSE}
+# Creating map of starting stations for members
+mapview(member_sf["number_of_rides"],
+        cex = member_sf$number_of_rides/200,
+        legend = TRUE,
+        col.regions = pal(200),
+        layer.name = "number_of_rides")
+rm(member_sf)
+rm(pal)
+
+```
+
+***
+
+### Detailed Recommendations
+
+<p>Considering that casual riders are spending so much time on the bikes and probably are not forced in any way to shorten those rides, it seems reasonable to **create conditions, limiting casual bike trips**, especially during weekends, while members could continue using bikes for as long as they need. Creating such inconvenience for the casual riders should create additional argument for them to consider buying membership. **To avoid significant dissatisfaction by the trip time shortening**, it could be recommended to **set such limit close to their average ride lengths** (i.e., ~2000 seconds or 33:20 minutes.)
+</p>
+
+<p>As could be seen from two previous maps, **casual riders prefer a handful of stations** to start their trips, while bike sharing members usually use bikes to commute to the jobs that are distributed around the city. Based on this information, it could be suggested to **create membership promotional campaign in vicinity of the bike stations, preferred by casual riders**, explaining new rules and advantages to become members.
+</p>
+
+***
+
+##### *Bike Staions, Favored by the Casual Riders*
+
+```{r displaying same as table, message=FALSE, warning=FALSE}
+writeLines("td, th { padding : 6px } th { background-color : black ; color : white; border : 1px solid black; } td { color : black ; border : 1px solid black }", con = "mystyle.css")
+knitr::kable(df_show, format = "html")
+rm(df_show)
+
+```
+***
+***
